@@ -1,61 +1,99 @@
-import base64
-import requests
-from fastapi import FastAPI, Request, Form
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from pathlib import Path
+from pydantic import BaseModel
+from sqlalchemy import Column, Integer, String, create_engine
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, Session
+import random
+import string
+from typing import List
+from dotenv import load_dotenv
+import os
+
+# 加载 .env 文件中的环境变量
+load_dotenv()
+
+# 从环境变量中读取配置
+DATABASE_URL = os.getenv("DATABASE_URL")
+SHORT_URL_DOMAIN = os.getenv("SHORT_URL_DOMAIN", "http://localhost:8000")
+SHORT_CODE_LENGTH = int(os.getenv("SHORT_CODE_LENGTH", 6))
+
+# 数据库连接设置
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+templates = Jinja2Templates(directory="templates")
 
 app = FastAPI()
 
-# 使用当前文件所在目录下的 templates 文件夹
-BASE_DIR = Path(__file__).resolve().parent
-templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+class URL(Base):
+    __tablename__ = "urls"
+    id = Column(Integer, primary_key=True, index=True)
+    short_code = Column(String(10), unique=True, index=True, nullable=False)
+    original_url = Column(String(2083), nullable=False)
 
-# 外部短链接 API 地址（根据实际情况修改）
-API_URL = "https://s.ops.ci/short"
+def create_tables():
+    Base.metadata.create_all(bind=engine)
 
+create_tables()
+
+class URLRequest(BaseModel):
+    original_url: str
+    length: int = SHORT_CODE_LENGTH  # 使用从配置文件读取的默认长度
+
+class BulkURLRequest(BaseModel):
+    urls: List[str]
+    length: int = SHORT_CODE_LENGTH  # 使用从配置文件读取的默认长度
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+def generate_short_code(length=SHORT_CODE_LENGTH, db=None):
+    characters = string.ascii_letters + string.digits
+    while True:
+        short_code = ''.join(random.choices(characters, k=length))
+        if not db or not db.query(URL).filter(URL.short_code == short_code).first():
+            return short_code
+
+@app.post("/shorten/")
+def shorten_url(request: URLRequest, db: Session = Depends(get_db)):
+    if not request.original_url.startswith("http://") and not request.original_url.startswith("https://"):
+        raise HTTPException(status_code=400, detail="Invalid URL format")
+    
+    short_code = generate_short_code(request.length, db=db)
+    new_url = URL(short_code=short_code, original_url=request.original_url)
+    db.add(new_url)
+    db.commit()
+    db.refresh(new_url)
+    return {"short_url": f"{SHORT_URL_DOMAIN}/{short_code}"}  # 使用配置的 URL 域名
+
+@app.post("/shorten/bulk/")
+def shorten_bulk_url(request: BulkURLRequest, db: Session = Depends(get_db)):
+    short_urls = []
+    for url in request.urls:
+        if not url.startswith("http://") and not url.startswith("https://"):
+            continue
+        short_code = generate_short_code(request.length, db=db)
+        new_url = URL(short_code=short_code, original_url=url)
+        db.add(new_url)
+        db.commit()
+        db.refresh(new_url)
+        short_urls.append({"original_url": url, "short_url": f"{SHORT_URL_DOMAIN}/{short_code}"})
+    return short_urls
+
+@app.get("/{short_code}")
+def redirect_url(short_code: str, db: Session = Depends(get_db)):
+    url_entry = db.query(URL).filter(URL.short_code == short_code).first()
+    if not url_entry:
+        raise HTTPException(status_code=404, detail="Short URL not found")
+    return RedirectResponse(url=url_entry.original_url)
 
 @app.get("/", response_class=HTMLResponse)
-async def index(request: Request):
-    """
-    GET 请求：返回初始页面，只有输入区域。
-    """
-    return templates.TemplateResponse("index.html", {"request": request, "results": None, "urls": ""})
-
-
-@app.post("/", response_class=HTMLResponse)
-async def generate(request: Request, urls: str = Form(...)):
-    """
-    POST 请求：处理用户输入的长链接，每行一个，
-    调用外部接口生成短链接，并提取响应中的 ShortUrl 字段，
-    最后将所有短链接按行拼接后传递给模板。
-    """
-    # 分割输入的长链接，每行一个，过滤空行
-    url_list = [line.strip() for line in urls.splitlines() if line.strip()]
-    results = []
-
-    for long_url in url_list:
-        # 对长链接进行 Base64 编码
-        encoded_long_url = base64.b64encode(long_url.encode()).decode()
-        files = {
-            "longUrl": (None, encoded_long_url),
-            "shortKey": (None, "")  # 留空，由 API 自动生成
-        }
-        try:
-            response = requests.post(API_URL, files=files)
-            if response.status_code == 200:
-                # 解析 JSON 响应，提取 ShortUrl 字段
-                try:
-                    data = response.json()
-                    short_url = data.get("ShortUrl", "错误：返回数据中无 ShortUrl")
-                except Exception as e:
-                    short_url = f"错误：解析响应失败 ({e})"
-            else:
-                short_url = f"错误：状态码 {response.status_code}"
-        except Exception as e:
-            short_url = f"异常：{e}"
-        results.append(short_url)
-
-    # 将所有短链接按行拼接
-    result_text = "\n".join(results)
-    return templates.TemplateResponse("index.html", {"request": request, "results": result_text, "urls": urls})
+def home(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})

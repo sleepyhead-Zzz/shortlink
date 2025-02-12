@@ -9,3 +9,21 @@ services:
     environment:
       - POETRY_VIRTUALENVS_CREATE=false
     restart: unless-stopped
+    depends_on:
+      - mysql 
+
+  mysql:
+    image: mysql:8.0
+    container_name: mysql-container
+    environment:
+      - MYSQL_ROOT_PASSWORD=DpVq8mVGCmykwYvVVfWGTSWx  # MySQL的root密码
+      - MYSQL_DATABASE=shorturl  # 创建的数据库名称
+    ports:
+      - "3306:3306"  # 映射MySQL端口
+    volumes:
+      - mysql-data:/var/lib/mysql  # 数据卷，持久化MySQL数据
+    restart: unless-stopped
+
+volumes:
+  mysql-data:
+    driver: local
