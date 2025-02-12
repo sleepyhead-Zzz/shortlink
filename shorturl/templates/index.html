@@ -50,6 +50,10 @@
         button:hover {
             background: #0056b3;
         }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
         .output-section {
             margin-top: 30px;
         }
@@ -69,6 +73,12 @@
             overflow: hidden;
             min-height: 100px;  /* 设置一个最小高度 */
         }
+        .loading {
+            display: none;
+            text-align: center;
+            margin-top: 20px;
+            color: #007BFF;
+        }
     </style>
 </head>
 <body>
@@ -80,7 +90,8 @@
         <label for="length">短链长度（默认 6）：</label>
         <input type="number" id="length" min="4" max="10" value="6">
 
-        <button onclick="shortenURLs()">生成短链接</button>
+        <button onclick="shortenURLs()" id="generateButton">生成短链接</button>
+        <div class="loading" id="loading">生成中，请稍候...</div>
 
         <div class="output-section">
             <h3>生成的短链接：</h3>
@@ -95,39 +106,50 @@
 
     <script>
         async function shortenURLs() {
-            let urls = document.getElementById("urls").value.trim().split("\n");
-            let length = parseInt(document.getElementById("length").value);
+            const generateButton = document.getElementById("generateButton");
+            const loading = document.getElementById("loading");
+            const urls = document.getElementById("urls").value.trim().split("\n");
+            const length = parseInt(document.getElementById("length").value);
             
             if (urls.length === 0 || urls[0] === "") {
                 alert("请输入至少一个 URL");
                 return;
             }
 
-            let response = await fetch("/shorten/bulk/", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ urls: urls, length: length })
-            });
+            // 禁用按钮并显示加载状态
+            generateButton.disabled = true;
+            loading.style.display = "block";
 
-            let originalLinksText = "";
-            let shortLinksText = "";
+            try {
+                const response = await fetch("/shorten/bulk/", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ urls: urls, length: length })
+                });
 
-            let resultData = await response.json();
-            resultData.forEach(entry => {
-                originalLinksText += entry.original_url + "\n";  // 原链接
-                shortLinksText += entry.short_url + "\n";  // 短链接
-            });
+                const resultData = await response.json();
+                let originalLinksText = "";
+                let shortLinksText = "";
 
-            let originalLinksTextarea = document.getElementById("originalLinks");
-            let shortLinksTextarea = document.getElementById("shortLinks");
+                resultData.forEach(entry => {
+                    originalLinksText += entry.original_url + "\n";  // 原链接
+                    shortLinksText += entry.short_url + "\n";  // 短链接
+                });
 
-            // 设置内容
-            originalLinksTextarea.value = originalLinksText;
-            shortLinksTextarea.value = shortLinksText;
+                document.getElementById("originalLinks").value = originalLinksText;
+                document.getElementById("shortLinks").value = shortLinksText;
 
-            // 自适应高度
-            adjustHeight(originalLinksTextarea);
-            adjustHeight(shortLinksTextarea);
+                // 自适应高度
+                adjustHeight(document.getElementById("originalLinks"));
+                adjustHeight(document.getElementById("shortLinks"));
+            } catch (error) {
+                console.error("生成短链接时出错：", error);
+                alert("生成短链接时出错，请稍后重试");
+            } finally {
+                // 重新启用按钮并隐藏加载状态
+                generateButton.disabled = false;
+                loading.style.display = "none";
+            }
         }
 
         // 自适应文本框高度

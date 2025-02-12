@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import Column, Integer, String, create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
@@ -45,7 +45,7 @@ class URLRequest(BaseModel):
 
 class BulkURLRequest(BaseModel):
     urls: List[str]
-    length: int = SHORT_CODE_LENGTH  # 使用从配置文件读取的默认长度
+    length: int = Field(default=SHORT_CODE_LENGTH, ge=4, le=10)
 
 def get_db():
     db = SessionLocal()
