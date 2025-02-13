@@ -8,6 +8,8 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 from sqlalchemy import Column, Integer, String, select
+from sqlalchemy.sql.ddl import CreateTable
+
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
 from typing import List
@@ -30,7 +32,7 @@ Base = declarative_base()
 
 templates = Jinja2Templates(directory="shorturl/templates")
 
-app = FastAPI()
+
 
 # 数据库模型
 class URL(Base):
@@ -43,13 +45,21 @@ class URL(Base):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 启动时创建表
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    # 在启动时创建表
+    try:
+        async with engine.begin() as conn:
+            # 使用 CreateTable 创建表
+            table = URL.__table__
+            await conn.execute(CreateTable(table, if_not_exists=True))
+            print("Table 'urls' created successfully.")
+    except Exception as e:
+        print(f"Error creating table: {e}")
+        raise e
+    
     yield
-    # 应用关闭时可以放置其他清理工作，例如关闭数据库连接等
-    # 可以使用 'await engine.dispose()' 关闭数据库连接池
     await engine.dispose()
+    
+app = FastAPI(lifespan=lifespan)  # 将 lifespan 事件与应用绑定
 
 # 请求模型
 class URLRequest(BaseModel):
