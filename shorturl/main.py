@@ -1,99 +1,156 @@
-from fastapi import FastAPI, Depends, HTTPException, Request
+from contextlib import asynccontextmanager
+import secrets
+import string
+import random
+from fastapi import FastAPI, Depends, HTTPException, Request, BackgroundTasks
 from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
-from sqlalchemy import Column, Integer, String, create_engine
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
-import random
-import string
+from sqlalchemy import Column, Integer, String, select
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.orm import sessionmaker, declarative_base
 from typing import List
 from dotenv import load_dotenv
 import os
 
-# 加载 .env 文件中的环境变量
+# 加载环境变量
 load_dotenv()
 
-# 从环境变量中读取配置
-DATABASE_URL = os.getenv("DATABASE_URL")
+# 配置信息
+DATABASE_URL = os.getenv("DATABASE_URL").replace("mysql://", "mysql+aiomysql://", 1)
+
 SHORT_URL_DOMAIN = os.getenv("SHORT_URL_DOMAIN", "http://localhost:8000")
 SHORT_CODE_LENGTH = int(os.getenv("SHORT_CODE_LENGTH", 6))
 
-# 数据库连接设置
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+# 异步数据库配置
+engine = create_async_engine(DATABASE_URL)
+SessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 Base = declarative_base()
 
 templates = Jinja2Templates(directory="shorturl/templates")
 
 app = FastAPI()
 
+# 数据库模型
 class URL(Base):
     __tablename__ = "urls"
     id = Column(Integer, primary_key=True, index=True)
-    short_code = Column(String(10), unique=True, index=True, nullable=False)
+    short_code = Column(String(10), unique=True, index=True, nullable=False) 
     original_url = Column(String(2083), nullable=False)
+    clicks = Column(Integer, default=0)
 
-def create_tables():
-    Base.metadata.create_all(bind=engine)
 
-create_tables()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 启动时创建表
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield
+    # 应用关闭时可以放置其他清理工作，例如关闭数据库连接等
+    # 可以使用 'await engine.dispose()' 关闭数据库连接池
+    await engine.dispose()
 
+# 请求模型
 class URLRequest(BaseModel):
     original_url: str
-    length: int = SHORT_CODE_LENGTH  # 使用从配置文件读取的默认长度
+    length: int = Field(default=SHORT_CODE_LENGTH, ge=4, le=10)
+
 
 class BulkURLRequest(BaseModel):
     urls: List[str]
     length: int = Field(default=SHORT_CODE_LENGTH, ge=4, le=10)
 
-def get_db():
-    db = SessionLocal()
-    try:
+# 依赖项
+async def get_db():
+    async with SessionLocal() as db:
         yield db
-    finally:
-        db.close()
 
-def generate_short_code(length=SHORT_CODE_LENGTH, db=None):
+# 工具函数
+async def generate_short_code(length: int, db: AsyncSession):
     characters = string.ascii_letters + string.digits
     while True:
         short_code = ''.join(random.choices(characters, k=length))
-        if not db or not db.query(URL).filter(URL.short_code == short_code).first():
+        result = await db.execute(select(URL).filter(URL.short_code == short_code))
+        if not result.scalar_one_or_none():
             return short_code
 
+# 路由
 @app.post("/shorten/")
-def shorten_url(request: URLRequest, db: Session = Depends(get_db)):
-    if not request.original_url.startswith("http://") and not request.original_url.startswith("https://"):
-        raise HTTPException(status_code=400, detail="Invalid URL format")
+async def shorten_url(
+    request: URLRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    if not request.original_url.startswith(("http://", "https://")):
+        raise HTTPException(400, detail="Invalid URL format")
     
-    short_code = generate_short_code(request.length, db=db)
+    short_code = await generate_short_code(request.length, db)
     new_url = URL(short_code=short_code, original_url=request.original_url)
     db.add(new_url)
-    db.commit()
-    db.refresh(new_url)
-    return {"short_url": f"{SHORT_URL_DOMAIN}/{short_code}"}  # 使用配置的 URL 域名
+    await db.commit()
+    return {"short_url": f"{SHORT_URL_DOMAIN}/{short_code}"}
 
 @app.post("/shorten/bulk/")
-def shorten_bulk_url(request: BulkURLRequest, db: Session = Depends(get_db)):
+async def shorten_bulk_url(
+    request: BulkURLRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    url_entries = []
     short_urls = []
+    
     for url in request.urls:
-        if not url.startswith("http://") and not url.startswith("https://"):
+        if not url.startswith(("http://", "https://")):
             continue
-        short_code = generate_short_code(request.length, db=db)
-        new_url = URL(short_code=short_code, original_url=url)
-        db.add(new_url)
-        db.commit()
-        db.refresh(new_url)
+        short_code = await generate_short_code(request.length, db)
+        url_entries.append(URL(short_code=short_code, original_url=url))
         short_urls.append({"original_url": url, "short_url": f"{SHORT_URL_DOMAIN}/{short_code}"})
+    
+    db.add_all(url_entries)
+    await db.commit()
     return short_urls
 
 @app.get("/{short_code}")
-def redirect_url(short_code: str, db: Session = Depends(get_db)):
-    url_entry = db.query(URL).filter(URL.short_code == short_code).first()
+async def redirect_url(
+    short_code: str,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db)
+):
+    result = await db.execute(select(URL).filter(URL.short_code == short_code))
+    url_entry = result.scalar_one_or_none()
+    
     if not url_entry:
-        raise HTTPException(status_code=404, detail="Short URL not found")
+        raise HTTPException(404, detail="Short URL not found")
+    
+    background_tasks.add_task(update_clicks, url_entry.id)
     return RedirectResponse(url=url_entry.original_url)
 
-@app.get("/", response_class=HTMLResponse)
-def home(request: Request):
+async def update_clicks(url_id: int):
+    async with SessionLocal() as db:
+        result = await db.execute(select(URL).filter(URL.id == url_id))
+        url_entry = result.scalar_one_or_none()
+        if url_entry:
+            url_entry.clicks += 1
+            await db.commit()
+
+# 认证路由
+security = HTTPBasic()
+ADMIN_CREDS = (
+    os.getenv("ADMIN_USERNAME", "admin"),
+    os.getenv("ADMIN_PASSWORD", "admin")
+)
+
+@app.get("/shorturl/private", response_class=HTMLResponse)
+async def admin_dashboard(
+    request: Request,
+    credentials: HTTPBasicCredentials = Depends(security)
+):
+    if not (
+        secrets.compare_digest(credentials.username, ADMIN_CREDS[0]) and
+        secrets.compare_digest(credentials.password, ADMIN_CREDS[1])
+    ):
+        raise HTTPException(
+            401,
+            detail="Unauthorized",
+            headers={"WWW-Authenticate": "Basic"},
+        )
     return templates.TemplateResponse("index.html", {"request": request})

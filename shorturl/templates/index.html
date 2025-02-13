@@ -110,7 +110,13 @@
             const loading = document.getElementById("loading");
             const urls = document.getElementById("urls").value.trim().split("\n");
             const length = parseInt(document.getElementById("length").value);
-            
+
+            // 前端验证短链长度是否在 4 到 10 之间
+            if (length < 4 || length > 10) {
+                alert("短链长度必须在 4 到 10 之间");
+                return;
+            }
+
             if (urls.length === 0 || urls[0] === "") {
                 alert("请输入至少一个 URL");
                 return;
